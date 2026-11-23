@@ -51,6 +51,10 @@ Dark Agent provides several build options to customize the payload for your spec
 # Build only BOFs 
 ./build.sh -b
 
+# Build BOFs for a specific architecture
+./build.sh -b -A x64      # Linux x64 (default)
+./build.sh -b -A arm64    # Linux arm64
+
 # Build debug version (verbose logging)
 ./build.sh -d
 
@@ -63,6 +67,9 @@ Dark Agent provides several build options to customize the payload for your spec
 # Specify C2 profile type
 ./build.sh -p http     # Build with HTTP profile (default)
 ./build.sh -p httpx    # Build with HTTPX profile (malleable C2)
+
+# Combine with an architecture
+./build.sh -r -A arm64 -p http
 ```
 
 **Build Features:**
@@ -70,10 +77,14 @@ Dark Agent provides several build options to customize the payload for your spec
 - **No Dependencies**: Resulting binary runs on any Linux/macOS system without external libraries
 - **Automatic BOF Compilation**: Built-in Unix commands compiled during build process
 - **Multi-threading Support**: BOF execution and SOCKS proxy handling use separate threads
+- **Per-Architecture Libraries**: OpenSSL, pcre2, bdwgc and zlib are built for each target (arm64/x64, Linux/macOS) at container build time, so cross-compiled payloads link against libraries of the matching architecture
 
 ### Build Parameters
 
 When creating a payload in Mythic, you can configure the following build parameters:
+
+**Target:**
+- **architecture** (ChooseOne, default: x64) - Target CPU architecture: `x64` or `arm64`. Both the agent binary and its BOFs are compiled for this architecture. Supported combinations are Linux x64/arm64 and macOS x64/arm64
 
 **Security & Performance:**
 - **debug_mode** (Boolean, default: false) - Enables verbose logging to stdout, useful for troubleshooting agent issues  
@@ -104,7 +115,8 @@ The debug build provides detailed logging to help with troubleshooting:
 
 3. **Running in debug mode**:
    ```bash
-   ./output/dark-agent-debug
+   ./output/dark-agent-linux-x64-debug
+   ./output/dark-agent-linux-arm64-debug   # when built with -A arm64
    ```
 
 Debug output includes:

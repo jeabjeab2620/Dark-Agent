@@ -28,6 +28,15 @@ class DarkAgent(PayloadType):
     check_if_callbacks_alive = True
     build_parameters = [
         BuildParameter(
+            name="architecture",
+            parameter_type=BuildParameterType.ChooseOne,
+            choices=["x64", "arm64"],
+            default_value="x64",
+            description="Target CPU architecture. Linux: x64 (native) or arm64 (statically cross-compiled). macOS: x64 (Intel) or arm64 (Apple Silicon).",
+            required=True,
+            group_name="Build Options"
+        ),
+        BuildParameter(
             name="debug_mode",
             parameter_type=BuildParameterType.Boolean,
             description="Build the agent in debug mode.  Debug mode includes trace messages to stdout when executing.  Don't use this on targets ;-)",
@@ -217,7 +226,15 @@ class DarkAgent(PayloadType):
         SYMMETRIC_JITTER = self.get_parameter("symmetric_jitter")
         REALTIME = self.get_parameter("realtime")
         CHUNK_SIZE = self.get_parameter("chunk_size")
+        TARGET_ARCH = self.get_parameter("architecture") or "x64"
+        if TARGET_ARCH not in ("x64", "arm64"):
+            resp.set_status(BuildStatus.Error)
+            resp.build_message = f"Unsupported architecture '{TARGET_ARCH}'. Must be 'x64' or 'arm64'."
+            resp.build_stderr = f"Unsupported architecture '{TARGET_ARCH}'"
+            return resp
         IS_MACOS = self.selected_os == "macOS"
+        TARGET_OS = "macos" if IS_MACOS else "linux"
+        BOF_OUTPUT_DIR = f"{TARGET_OS}-{TARGET_ARCH}"
         tmp = tempfile.TemporaryDirectory(suffix=self.uuid)
         agent_build_path = Path(tmp.name)
 
@@ -248,103 +265,62 @@ class DarkAgent(PayloadType):
             #################################################################
             #################################################################
             if IS_MACOS:
-                # Cross-compile BOFs for macOS (aarch64) using Zig
-                build_cmd = ["./build.sh", "-B"]
-                proc = await asyncio.create_subprocess_exec(
-                    *build_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(agent_build_path)
-                )
-                stdout, stderr = await proc.communicate()
-
-                if proc.returncode != 0:
-                    bof_error = stderr.decode()
-                    await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
-                        PayloadUUID=self.uuid,
-                        StepName="Building BOFs",
-                        StepStdout=f"Error compiling macOS BOFs: {bof_error}",
-                        StepSuccess=False
-                    ))
-                    raise Exception(f"Failed to build macOS BOFs: {bof_error}")
-                else:
-                    bofs_dir = agent_build_path / "output" / "bofs" / "macos"
-                    bof_files = [f for f in os.listdir(bofs_dir) if f.endswith('.o')]
-
-                    bof_names = []
-                    for bof_file in bof_files:
-                        bof_path = bofs_dir / bof_file
-                        bof_name = os.path.splitext(bof_file)[0]
-                        bof_content = open(bof_path, 'rb').read()
-
-                        file_resp = await SendMythicRPCFileCreate(MythicRPCFileCreateMessage(
-                            PayloadUUID=self.uuid,
-                            FileContents=bof_content,
-                            Filename=f"{self.uuid}_{bof_file}",
-                            Comment=f"Available BOF (macOS aarch64): {bof_name}"
-                        ))
-
-                        if not file_resp.Success:
-                            logging.error(f"Failed to store macOS BOF {bof_name}: {file_resp.Error}")
-                        else:
-                            bof_names.append(bof_name)
-
-                    await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
-                        PayloadUUID=self.uuid,
-                        StepName="Building BOFs",
-                        StepStdout=f"Compiled and stored {len(bof_names)} macOS aarch64 BOF files: {', '.join(bof_names)}.\n\nOutput: {stdout.decode()}",
-                        StepSuccess=True
-                    ))
+                # Cross-compile BOFs for the selected macOS architecture using Zig
+                build_cmd = ["./build.sh", "-B", "-A", TARGET_ARCH]
             else:
-                # Build BOFs (Linux only)
-                build_cmd = ["./build.sh", "-b"]
-                proc = await asyncio.create_subprocess_exec(
-                    *build_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(agent_build_path)
-                )
-                stdout, stderr = await proc.communicate()
+                # Build BOFs for the selected Linux architecture
+                build_cmd = ["./build.sh", "-b", "-A", TARGET_ARCH]
 
-                if proc.returncode != 0:
-                    bof_error = stderr.decode()
-                    await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
-                        PayloadUUID=self.uuid,
-                        StepName="Building BOFs",
-                        StepStdout=f"Error compiling BOFs: {bof_error}",
-                        StepSuccess=False
-                    ))
-                    raise Exception(f"Failed to build BOFs: {bof_error}")
+            proc = await asyncio.create_subprocess_exec(
+                *build_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(agent_build_path)
+            )
+            stdout, stderr = await proc.communicate()
+            bof_stdout = stdout.decode()
+
+            if proc.returncode != 0:
+                bof_error = stderr.decode()
+                await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
+                    PayloadUUID=self.uuid,
+                    StepName="Building BOFs",
+                    StepStdout=f"Error compiling {TARGET_OS} {TARGET_ARCH} BOFs: {bof_error}",
+                    StepSuccess=False
+                ))
+                raise Exception(f"Failed to build {TARGET_OS} {TARGET_ARCH} BOFs: {bof_error}")
+
+            bofs_dir = agent_build_path / "output" / "bofs" / BOF_OUTPUT_DIR
+            if not bofs_dir.is_dir():
+                raise Exception(f"BOF output directory not found: {bofs_dir}")
+
+            bof_files = [f for f in os.listdir(bofs_dir) if f.endswith('.o')]
+            bof_names = []
+            for bof_file in bof_files:
+                bof_path = bofs_dir / bof_file
+                bof_name = os.path.splitext(bof_file)[0]
+                bof_content = open(bof_path, 'rb').read()
+                logging.info(f"Found bof in {bof_path}")
+
+                file_resp = await SendMythicRPCFileCreate(MythicRPCFileCreateMessage(
+                    PayloadUUID=self.uuid,
+                    FileContents=bof_content,
+                    Filename=f"{self.uuid}_{bof_file}",
+                    Comment=f"Available BOF ({TARGET_OS} {TARGET_ARCH}): {bof_name}"
+                ))
+
+                if not file_resp.Success:
+                    logging.error(f"Failed to store BOF {bof_name} in Mythic: {file_resp.Error}")
                 else:
-                    bofs_dir = agent_build_path / "output" / "bofs"
-                    bof_files = [f for f in os.listdir(bofs_dir) if f.endswith('.o')]
+                    bof_names.append(bof_name)
+                    logging.info(f"Stored BOF {bof_name} in Mythic with ID: {file_resp.AgentFileId}")
 
-                    bof_names = []
-                    for bof_file in bof_files:
-                        bof_path = bofs_dir / bof_file
-                        bof_name = os.path.splitext(bof_file)[0]
-                        bof_content = open(bof_path, 'rb').read()
-                        logging.info(f"Found bof in {bof_path} ")
-
-                        file_resp = await SendMythicRPCFileCreate(MythicRPCFileCreateMessage(
-                            PayloadUUID=self.uuid,
-                            FileContents=bof_content,
-                            Filename=f"{self.uuid}_{bof_file}",
-                            Comment=f"Available BOF: {bof_name}"
-                        ))
-
-                        if not file_resp.Success:
-                            logging.error(f"Failed to store BOF {bof_name} in Mythic: {file_resp.Error}")
-                        else:
-                            bof_names.append(bof_name)
-                            logging.info(f"Stored BOF {bof_name} in Mythic with ID: {file_resp.AgentFileId}")
-
-                    await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
-                        PayloadUUID=self.uuid,
-                        StepName="Building BOFs",
-                        StepStdout=f"Compiled and stored {len(bof_names)} BOF files: {', '.join(bof_names)}.\n\nOutput: {stdout}",
-                        StepSuccess=True
-                    ))
+            await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
+                PayloadUUID=self.uuid,
+                StepName="Building BOFs",
+                StepStdout=f"Compiled and stored {len(bof_names)} {TARGET_OS} {TARGET_ARCH} BOF files: {', '.join(bof_names)}.\n\nOutput: {bof_stdout}",
+                StepSuccess=True
+            ))
 
 
             #################################################################
@@ -408,7 +384,7 @@ class DarkAgent(PayloadType):
             ### Step 4: Compiling Agent
             #################################################################
             #################################################################
-            build_cmd = ["./build.sh"]
+            build_cmd = ["./build.sh", "-A", TARGET_ARCH]
 
             # Detect C2 profile type
             profile_name = "http"
@@ -418,30 +394,33 @@ class DarkAgent(PayloadType):
                     profile_name = c2_profile
                     break
 
+            # build.sh names its outputs output/dark-agent-<os>-<arch>[-<mode>]
+            output_prefix = f"dark-agent-{TARGET_OS}-{TARGET_ARCH}"
+
             if IS_MACOS:
                 # macOS cross-compile via Crystal + Zig.
                 # OpenSSL is statically linked for both platforms with no runtime libssl dependency.
                 if DEBUG_MODE:
                     build_cmd.extend(["-p", profile_name, "-M"])
-                    output_file = agent_build_path / "output/dark-agent-macos-debug"
+                    output_file = agent_build_path / "output" / f"{output_prefix}-debug"
                 else:
                     build_cmd.extend(["-p", profile_name, "-m"])
-                    output_file = agent_build_path / "output/dark-agent-macos"
+                    output_file = agent_build_path / "output" / output_prefix
                 binary_type = "Mach-O"
             else:
-                # Linux build
+                # Linux build (native for x64, Crystal cross-compile for arm64)
                 build_cmd.extend(["-p", profile_name])
                 if DEBUG_MODE:
                     build_cmd.append("-d")
-                    output_file = agent_build_path / "output/dark-agent-debug"
+                    output_file = agent_build_path / "output" / f"{output_prefix}-debug"
                     binary_type = "ELF"
                 elif DEBUG_SOCKS_MODE:
                     build_cmd.append("-S")
-                    output_file = agent_build_path / "output/dark-agent-socks-debug"
+                    output_file = agent_build_path / "output" / f"{output_prefix}-socks-debug"
                     binary_type = "ELF"
                 else:
                     build_cmd.append("-r")
-                    output_file = agent_build_path / "output/dark-agent"
+                    output_file = agent_build_path / "output" / output_prefix
                     binary_type = "ELF"
 
             proc = await asyncio.create_subprocess_exec(
@@ -462,7 +441,7 @@ class DarkAgent(PayloadType):
                 await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
                     PayloadUUID=self.uuid,
                     StepName="Compiling",
-                    StepStdout=f"Compiled {binary_type} binary in {'DEBUG' if DEBUG_MODE else 'RELEASE'} mode",
+                    StepStdout=f"Compiled {binary_type} binary ({TARGET_OS} {TARGET_ARCH}) in {'DEBUG' if DEBUG_MODE else 'RELEASE'} mode",
                     StepSuccess=True
                 ))
 
@@ -472,7 +451,7 @@ class DarkAgent(PayloadType):
                 encryption_status = "encryption enabled" if ENCRYPTION else "ENCRYPTION DISABLED"
                 jitter_mode = "symmetric jitter" if SYMMETRIC_JITTER else "positive-only jitter"
                 resp.build_message = (
-                    f"Successfully built Dark Agent {binary_type} "
+                    f"Successfully built Dark Agent {binary_type} for {TARGET_OS}/{TARGET_ARCH} "
                     f"({'!!!DEBUG!!!' if DEBUG_MODE else 'release'} mode, "
                     f"{encryption_status}, {jitter_mode}, {CHUNK_SIZE}KB chunks)!"
                 )

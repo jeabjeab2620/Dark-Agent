@@ -3,10 +3,14 @@
     "languages": ["Crystal"],
     "features": {
         "mythic": ["artifacts", "browser scripts", "docker", "dynamic loading", "file chunking", "file browser", "process browser", "process responses", "socks"],
-        "custom": ["bofs", "job control", "symmetric jitter", "realtime mode"]
+        "custom": ["bofs", "job control", "symmetric jitter", "realtime mode", "architecture selection"]
     },
     "payload_output": ["elf", "macho"],
-    "architectures": ["x86_64", "arm_64"],
+    "architectures": ["x64", "arm64"],
+    "architectures_by_os": {
+        "Linux": ["x64", "arm64"],
+        "macOS": ["x64", "arm64"]
+    },
     "c2": ["http", "httpx"],
     "mythic_version": "3.3",
     "agent_version": "1.0.0",

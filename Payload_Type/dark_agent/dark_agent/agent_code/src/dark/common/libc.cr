@@ -15,11 +15,16 @@ lib LibC
   fun brk(addr : Void*) : Int32
 
   {% if flag?(:darwin) %}
-  # Apple Silicon W^X: switch JIT region between write-mode (0) and exec-mode (1)
-  fun pthread_jit_write_protect_np(enable : Int32) : Void
   # Flush instruction cache lines (to Point of Unification)
   fun sys_icache_invalidate(start : Pointer(Void), size : SizeT) : Void
   # Flush data cache lines to Point of Coherency (main memory) before mprotect
   fun sys_dcache_flush(start : Pointer(Void), size : SizeT) : Void
+  {% end %}
+
+  {% if flag?(:darwin) && flag?(:aarch64) %}
+  # Apple Silicon W^X: switch JIT region between write-mode (0) and exec-mode (1).
+  # Apple-silicon only -- Intel macOS does not export this symbol, so it must
+  # stay behind the arch guard or macOS x64 fails to link.
+  fun pthread_jit_write_protect_np(enable : Int32) : Void
   {% end %}
 end

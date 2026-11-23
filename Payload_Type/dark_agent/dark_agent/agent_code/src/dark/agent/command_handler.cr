@@ -52,6 +52,8 @@ module Dark::Agent
 
       # Set up function callbacks for BOFs
       Dark::ELF::Callbacks.register_defaults
+      # Register glibc stat-family shims (stat/lstat/fstat) for BOF symbol resolution
+      Dark::ELF::Callbacks.register_libc_shims
 
     end
 

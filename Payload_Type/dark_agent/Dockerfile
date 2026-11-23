@@ -80,13 +80,23 @@ RUN mkdir -p /opt/macos-sdk && \
     tar -xf /tmp/macos-sdk.tar.xz -C /opt/macos-sdk && \
     rm /tmp/macos-sdk.tar.xz
 
-# Build macOS static libraries via Zig cross-compiler
-# Produces: libssl.a, libcrypto.a, libpcre2-8.a, libevent.a, libgc.a
-# under /opt/multiarch-libs/aarch64-apple-darwin/
-COPY scripts/build_macos_libs.sh /tmp/build_macos_libs.sh
-RUN chmod +x /tmp/build_macos_libs.sh && \
-    /tmp/build_macos_libs.sh && \
-    rm /tmp/build_macos_libs.sh
+# Build static libraries for every supported target via the Zig cross-compiler.
+# Produces libssl.a, libcrypto.a, libpcre2-8.a, libgc.a and libz.a (plus
+# libevent.a for darwin) under /opt/multiarch-libs/<arch>-<os>/:
+#
+#   aarch64-apple-darwin  - macOS arm64 (Apple Silicon)
+#   x86_64-apple-darwin   - macOS x64 (Intel)
+#   aarch64-linux-gnu     - Linux arm64
+#
+# Linux x64 links against the host apt libraries and /opt/openssl-3, so it
+# needs no entry here. This step builds OpenSSL + pcre2 + bdwgc + zlib three
+# times, so it meaningfully lengthens the image build.
+COPY scripts/build_cross_libs.sh /tmp/build_cross_libs.sh
+RUN chmod +x /tmp/build_cross_libs.sh && \
+    /tmp/build_cross_libs.sh darwin aarch64 && \
+    /tmp/build_cross_libs.sh darwin x86_64 && \
+    /tmp/build_cross_libs.sh linux aarch64 && \
+    rm /tmp/build_cross_libs.sh
 
 RUN apt clean && rm -Rf /tmp/*
 

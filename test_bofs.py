@@ -296,6 +296,8 @@ async def main():
     ap = argparse.ArgumentParser(description="dark-agent BOF test harness")
     ap.add_argument("--os", choices=["linux", "macos"], default="linux",
                     help="Target platform (default: linux)")
+    ap.add_argument("--arch", choices=["x64", "arm64"], default="x64",
+                    help="Target architecture (default: x64)")
     ap.add_argument("--skip-load", action="store_true",
                     help="Skip BOF loading: assume already loaded in callback")
     ap.add_argument("--bof", metavar="NAME[,NAME]",
@@ -314,10 +316,19 @@ async def main():
 
     names_filter = set(args.bof.split(",")) if args.bof else None
 
-    bof_dir = BOF_BASE
+    # BOFs are compiled per target into output/bofs/<os>-<arch>/. Resolve the
+    # directory from --os/--arch, falling back to the legacy flat layout.
+    bof_dir = BOF_BASE / f"{args.os}-{args.arch}"
     if not bof_dir.exists():
-        print(f"[-] BOF directory not found: {bof_dir}")
-        sys.exit(1)
+        if BOF_BASE.exists() and any(BOF_BASE.glob("*.o")):
+            bof_dir = BOF_BASE
+        else:
+            available = sorted(p.name for p in BOF_BASE.glob("*") if p.is_dir()) if BOF_BASE.exists() else []
+            print(f"[-] BOF directory not found: {bof_dir}")
+            if available:
+                print(f"    Available: {', '.join(available)}")
+            print("    Build them with ./build.sh -b -A <arch> (or -B for macOS)")
+            sys.exit(1)
 
     inst = await login(args.host, args.port, args.user, args.password)
 

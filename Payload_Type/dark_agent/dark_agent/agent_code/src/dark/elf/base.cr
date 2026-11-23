@@ -3,8 +3,23 @@ require "../common/logger"
 
 module Dark::ELF
   MAGIC = UInt8.slice(0x7f, 'E'.ord, 'L'.ord, 'F'.ord)
-  PAGE_SIZE = 4096_u64
-  PAGE_MASK = (PAGE_SIZE - 1)
+
+  # Memoized runtime page size. The loader aligns BOF section mappings to this
+  # value, so it must not be a compile-time constant: aarch64 kernels can run
+  # with 16K or 64K pages. LibC::SC_PAGESIZE and LibC.sysconf come from
+  # Crystal's stdlib (30 on Linux, 29 on Darwin).
+  @@page_size : UInt64?
+
+  def self.page_size : UInt64
+    @@page_size ||= begin
+      size = LibC.sysconf(LibC::SC_PAGESIZE)
+      size > 0 ? size.to_u64 : 4096_u64
+    end
+  end
+
+  def self.page_mask : UInt64
+    page_size - 1
+  end
 
   # Auxiliary vector types
   AT_NULL   = 0_u64  # End of vector
@@ -44,8 +59,13 @@ module Dark::ELF
       # macOS uses MAP_ANON=0x1000; Linux uses MAP_ANONYMOUS=0x20
       {% if flag?(:darwin) %}
       ANONYMOUS = 0x1000
-      # Apple Silicon requires MAP_JIT for W->X transitions in unsigned binaries
+      # Apple Silicon requires MAP_JIT for W->X transitions in unsigned binaries.
+      # Intel macOS has no W^X enforcement, so a plain RWX mapping is correct there.
+      {% if flag?(:aarch64) %}
       JIT       = 0x0800
+      {% else %}
+      JIT       = 0x0
+      {% end %}
       {% else %}
       ANONYMOUS = 0x20
       JIT       = 0x0
@@ -328,6 +348,19 @@ module Dark::ELF
     end
 
     private def check_elf_compatibility
+      # Reject BOFs built for a different CPU up front. Without this, an
+      # architecture mismatch only surfaces much later as a confusing failure
+      # during relocation or execution.
+      {% if flag?(:x86_64) %}
+      if machine != Machine::X86_64
+        raise Error.new("BOF architecture mismatch: object targets #{machine}, but this agent is x86_64")
+      end
+      {% elsif flag?(:aarch64) %}
+      if machine != Machine::AARCH64
+        raise Error.new("BOF architecture mismatch: object targets #{machine}, but this agent is aarch64")
+      end
+      {% end %}
+
       case machine
       when Machine::X86_64
         raise Error.new("Incompatible ELF class") unless ident.klass == Klass::ELF64

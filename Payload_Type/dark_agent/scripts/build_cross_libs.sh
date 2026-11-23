@@ -1,28 +1,78 @@
 #!/bin/bash
-# Builds macOS static libraries from source using Zig as the cross-compiler.
-# Runs once at Docker image build time. Produces libs under /opt/multiarch-libs/aarch64-apple-darwin/.
+# Builds static libraries for a cross-compile target using Zig as the cross-compiler.
+# Runs at Docker image build time, once per supported (os, arch) combination.
+#
+# Usage: build_cross_libs.sh <darwin|linux> <aarch64|x86_64>
+#
+# Produces static libssl.a, libcrypto.a, libpcre2-8.a, libevent.a (darwin only),
+# libgc.a and libz.a under /opt/multiarch-libs/<arch>-<os>/.
 #
 # Requires:
 #   - zig in PATH
-#   - macOS SDK at /opt/macos-sdk/MacOSX12.3.sdk
 #   - cmake, wget, tar, make in PATH
+#   - the macOS SDK at /opt/macos-sdk/MacOSX12.3.sdk for darwin targets
 
 set -e
 
-MACOS_TARGET="aarch64-macos-none"
+OS_NAME="$1"
+ARCH_NAME="$2"
+
+if [ -z "$OS_NAME" ] || [ -z "$ARCH_NAME" ]; then
+    echo "[ERROR] Usage: $0 <darwin|linux> <aarch64|x86_64>"
+    exit 1
+fi
+
 MACOS_SDK="/opt/macos-sdk/MacOSX12.3.sdk"
-MACOS_PREFIX="/opt/multiarch-libs/aarch64-apple-darwin"
 JOBS=2
 
-ZIG_CC="zig cc -target ${MACOS_TARGET} -isysroot ${MACOS_SDK}"
-ZIG_CXX="zig c++ -target ${MACOS_TARGET} -isysroot ${MACOS_SDK}"
-ZIG_AR="zig ar"
-ZIG_RANLIB="zig ranlib"
+case "${OS_NAME}/${ARCH_NAME}" in
+    darwin/aarch64)
+        ZIG_TARGET="aarch64-macos-none"
+        LIB_PREFIX="/opt/multiarch-libs/aarch64-apple-darwin"
+        OPENSSL_CONFIG="darwin64-arm64"
+        BUILD_LIBEVENT=1
+        ;;
+    darwin/x86_64)
+        ZIG_TARGET="x86_64-macos-none"
+        LIB_PREFIX="/opt/multiarch-libs/x86_64-apple-darwin"
+        OPENSSL_CONFIG="darwin64-x86_64-cc"
+        BUILD_LIBEVENT=1
+        ;;
+    linux/aarch64)
+        ZIG_TARGET="aarch64-linux-gnu.2.27"
+        LIB_PREFIX="/opt/multiarch-libs/aarch64-linux-gnu"
+        OPENSSL_CONFIG="linux-aarch64"
+        # Crystal 1.20 selects epoll on Linux, so libevent is not linked there.
+        BUILD_LIBEVENT=0
+        ;;
+    linux/x86_64)
+        ZIG_TARGET="x86_64-linux-gnu.2.27"
+        LIB_PREFIX="/opt/multiarch-libs/x86_64-linux-gnu"
+        OPENSSL_CONFIG="linux-x86_64"
+        BUILD_LIBEVENT=0
+        ;;
+    *)
+        echo "[ERROR] Unsupported target: ${OS_NAME}/${ARCH_NAME}"
+        exit 1
+        ;;
+esac
 
-mkdir -p "${MACOS_PREFIX}/lib/pkgconfig"
-mkdir -p "${MACOS_PREFIX}/include"
-mkdir -p /tmp/macos-libs-build
-cd /tmp/macos-libs-build
+
+# macOS builds need the SDK sysroot; Linux builds must not reference it.
+if [ "${OS_NAME}" = "darwin" ]; then
+    SYSROOT_FLAGS="-isysroot ${MACOS_SDK}"
+else
+    SYSROOT_FLAGS=""
+fi
+
+echo "[*] Building static libraries for ${OS_NAME}/${ARCH_NAME}"
+echo "    zig target: ${ZIG_TARGET}"
+echo "    prefix:     ${LIB_PREFIX}"
+
+mkdir -p "${LIB_PREFIX}/lib/pkgconfig"
+mkdir -p "${LIB_PREFIX}/include"
+mkdir -p /tmp/cross-libs-build
+cd /tmp/cross-libs-build
 
 # cmake needs single-binary tools so create wrappers since zig uses subcommands
 # and cmake doesn't reliably propagate CMAKE_C_FLAGS to all compilation steps
@@ -38,37 +88,42 @@ zig ranlib "$@"
 ZIGEOF
 chmod +x /tmp/zig-ranlib
 
-# zig-cc wrapper: bakes in the macOS cross-compile target + sysroot so cmake
-# always gets the right flags regardless of how it invokes the compiler
+# zig-cc wrapper: bakes in the cross-compile target (and sysroot for darwin) so
+# cmake always gets the right flags regardless of how it invokes the compiler
 cat > /tmp/zig-cc << ZIGEOF
 #!/bin/sh
-zig cc -target ${MACOS_TARGET} -isysroot ${MACOS_SDK} "\$@"
+zig cc -target ${ZIG_TARGET} ${SYSROOT_FLAGS} "\$@"
 ZIGEOF
 chmod +x /tmp/zig-cc
 
-echo "[*] Building OpenSSL for macOS..."
+echo "[*] Building OpenSSL..."
 OPENSSL_VER=3.1.2
 wget -q "https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz"
 tar -xzf "openssl-${OPENSSL_VER}.tar.gz"
 cd "openssl-${OPENSSL_VER}"
 # -DOPENSSL_NO_APPLE_CRYPTO_RANDOM: skip CommonCrypto hardware RNG (requires macOS headers we don't have at cross-compile time)
+if [ "${OS_NAME}" = "darwin" ]; then
+    OPENSSL_EXTRA_CFLAGS="-DOPENSSL_NO_APPLE_CRYPTO_RANDOM"
+else
+    OPENSSL_EXTRA_CFLAGS=""
+fi
 CC="zig cc" \
-CFLAGS="-target ${MACOS_TARGET} -isysroot ${MACOS_SDK} -DOPENSSL_NO_APPLE_CRYPTO_RANDOM" \
+CFLAGS="-target ${ZIG_TARGET} ${SYSROOT_FLAGS} ${OPENSSL_EXTRA_CFLAGS}" \
 AR="${ZIG_AR}" \
 RANLIB="${ZIG_RANLIB}" \
-./Configure darwin64-arm64 \
+./Configure "${OPENSSL_CONFIG}" \
     no-shared \
     no-tests \
     no-ui-console \
     no-async \
-    --prefix="${MACOS_PREFIX}" \
+    --prefix="${LIB_PREFIX}" \
     --openssldir="/etc/ssl"
 make -j${JOBS} build_libs
 make install_dev
-cd /tmp/macos-libs-build
+cd /tmp/cross-libs-build
 echo "[+] OpenSSL done"
 
-echo "[*] Building pcre2 for macOS..."
+echo "[*] Building pcre2..."
 PCRE2_VER=10.47
 wget -q "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VER}/pcre2-${PCRE2_VER}.tar.gz"
 tar -xzf "pcre2-${PCRE2_VER}.tar.gz"
@@ -80,40 +135,48 @@ cmake .. \
     -DCMAKE_C_COMPILER="/tmp/zig-cc" \
     -DCMAKE_AR="/tmp/zig-ar" \
     -DCMAKE_RANLIB="/tmp/zig-ranlib" \
-    -DCMAKE_INSTALL_PREFIX="${MACOS_PREFIX}" \
-    -DCMAKE_SYSTEM_NAME=Darwin
+    -DCMAKE_INSTALL_PREFIX="${LIB_PREFIX}" \
+    -DCMAKE_SYSTEM_NAME="$( [ "${OS_NAME}" = "darwin" ] && echo Darwin || echo Linux )" \
+    -DCMAKE_SYSTEM_PROCESSOR="${ARCH_NAME}" \
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
 make -j${JOBS}
 make install
-cd /tmp/macos-libs-build
+cd /tmp/cross-libs-build
 echo "[+] pcre2 done"
 
-echo "[*] Building libevent for macOS..."
-LIBEVENT_VER=2.1.12
-wget -q "https://github.com/libevent/libevent/releases/download/release-${LIBEVENT_VER}-stable/libevent-${LIBEVENT_VER}-stable.tar.gz"
-tar -xzf "libevent-${LIBEVENT_VER}-stable.tar.gz"
-cd "libevent-${LIBEVENT_VER}-stable"
-CC="${ZIG_CC}" \
-CXX="${ZIG_CXX}" \
-AR="/tmp/zig-ar" \
-RANLIB="/tmp/zig-ranlib" \
-./configure \
-    --host=aarch64-apple-darwin \
-    --disable-shared \
-    --enable-static \
-    --disable-openssl \
-    --disable-samples \
-    --disable-libevent-regress \
-    --prefix="${MACOS_PREFIX}"
-make -j${JOBS}
-make install
-cd /tmp/macos-libs-build
-echo "[+] libevent done"
+if [ "${BUILD_LIBEVENT}" = "1" ]; then
+    echo "[*] Building libevent..."
+    LIBEVENT_VER=2.1.12
+    wget -q "https://github.com/libevent/libevent/releases/download/release-${LIBEVENT_VER}-stable/libevent-${LIBEVENT_VER}-stable.tar.gz"
+    tar -xzf "libevent-${LIBEVENT_VER}-stable.tar.gz"
+    cd "libevent-${LIBEVENT_VER}-stable"
+    CC="zig cc -target ${ZIG_TARGET} ${SYSROOT_FLAGS}" \
+    CXX="zig c++ -target ${ZIG_TARGET} ${SYSROOT_FLAGS}" \
+    AR="/tmp/zig-ar" \
+    RANLIB="/tmp/zig-ranlib" \
+    ./configure \
+        --host="$( [ "${ARCH_NAME}" = "aarch64" ] && echo aarch64 || echo x86_64 )-apple-darwin" \
+        --disable-shared \
+        --enable-static \
+        --disable-openssl \
+        --disable-samples \
+        --disable-libevent-regress \
+        --prefix="${LIB_PREFIX}"
+    make -j${JOBS}
+    make install
+    cd /tmp/cross-libs-build
+    echo "[+] libevent done"
+else
+    echo "[*] Skipping libevent (not linked on ${OS_NAME}/${ARCH_NAME})"
+fi
 
 # Stub out missing SDK headers that bdw-gc needs for macOS targets.
 # The joseluisq MacOSX12.3.sdk omits some deprecated Mach headers.
 # These stubs satisfy the #include without pulling in real implementations
 # bdw-gc's actual Darwin code paths are disabled via cmake flags below.
-mkdir -p "${MACOS_SDK}/usr/include/mach-o"
+if [ "${OS_NAME}" = "darwin" ]; then
+    mkdir -p "${MACOS_SDK}/usr/include/mach-o"
+    if [ ! -f "${MACOS_SDK}/usr/include/mach-o/getsect.h" ]; then
 cat > "${MACOS_SDK}/usr/include/mach-o/getsect.h" << 'STUBEOF'
 #pragma once
 #include <stdint.h>
@@ -130,12 +193,13 @@ extern uint8_t *get_edata(void);
 }
 #endif
 STUBEOF
+    fi
 
-mkdir -p "${MACOS_SDK}/usr/include/mach"
-# Provide mach/exception.h so bdw-gc's darwin_stop_world.c can compile.
-# This gives the GC real GC_push_all_stacks/GC_start_world/GC_stop_world
-# implementations that properly handle multi-threaded Crystal (preview_mt).
-[ -f "${MACOS_SDK}/usr/include/mach/exception.h" ] || \
+    mkdir -p "${MACOS_SDK}/usr/include/mach"
+    # Provide mach/exception.h so bdw-gc's darwin_stop_world.c can compile.
+    # This gives the GC real GC_push_all_stacks/GC_start_world/GC_stop_world
+    # implementations that properly handle multi-threaded Crystal (preview_mt).
+    if [ ! -f "${MACOS_SDK}/usr/include/mach/exception.h" ]; then
 cat > "${MACOS_SDK}/usr/include/mach/exception.h" << 'STUBEOF'
 #pragma once
 #ifndef _MACH_EXCEPTION_H_
@@ -190,8 +254,10 @@ typedef mach_port_t           *exception_port_array_t;
 
 #endif /* _MACH_EXCEPTION_H_ */
 STUBEOF
+    fi
+fi
 
-echo "[*] Building Boehm GC for macOS..."
+echo "[*] Building Boehm GC..."
 BDWGC_VER=8.2.12
 ATOMICOPS_VER=7.10.0
 wget -q "https://github.com/ivmai/bdwgc/releases/download/v${BDWGC_VER}/gc-${BDWGC_VER}.tar.gz"
@@ -206,16 +272,19 @@ cmake .. \
     -Denable_docs=OFF \
     -Denable_dynamic_loading=OFF \
     -DCMAKE_C_COMPILER="/tmp/zig-cc" \
-    -DCMAKE_C_FLAGS="-I${MACOS_SDK}/usr/include" \
+    -DCMAKE_C_FLAGS="$( [ "${OS_NAME}" = "darwin" ] && echo "-I${MACOS_SDK}/usr/include" )" \
     -DCMAKE_AR="/tmp/zig-ar" \
     -DCMAKE_RANLIB="/tmp/zig-ranlib" \
-    -DCMAKE_INSTALL_PREFIX="${MACOS_PREFIX}"
+    -DCMAKE_INSTALL_PREFIX="${LIB_PREFIX}" \
+    -DCMAKE_SYSTEM_NAME="$( [ "${OS_NAME}" = "darwin" ] && echo Darwin || echo Linux )" \
+    -DCMAKE_SYSTEM_PROCESSOR="${ARCH_NAME}" \
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
 make -j${JOBS}
 make install
-cd /tmp/macos-libs-build
+cd /tmp/cross-libs-build
 echo "[+] Boehm GC done"
 
-echo "[*] Building zlib for macOS..."
+echo "[*] Building zlib..."
 ZLIB_VER=1.3.1
 wget -q "https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz"
 tar -xzf "zlib-${ZLIB_VER}.tar.gz"
@@ -225,13 +294,13 @@ AR="/tmp/zig-ar" \
 RANLIB="/tmp/zig-ranlib" \
 ./configure \
     --static \
-    --prefix="${MACOS_PREFIX}"
+    --prefix="${LIB_PREFIX}"
 make -j${JOBS} libz.a
 make install
-cd /tmp/macos-libs-build
+cd /tmp/cross-libs-build
 echo "[+] zlib done"
 
-rm -rf /tmp/macos-libs-build
-echo "[+] All macOS static libraries built successfully"
-echo "    Installed to: ${MACOS_PREFIX}"
-ls "${MACOS_PREFIX}/lib/"*.a
+rm -rf /tmp/cross-libs-build
+echo "[+] All static libraries built for ${OS_NAME}/${ARCH_NAME}"
+echo "    Installed to: ${LIB_PREFIX}"
+ls "${LIB_PREFIX}/lib/"*.a

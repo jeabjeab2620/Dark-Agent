@@ -7,6 +7,9 @@ log_debug("Starting Dark Agent in direct mode (COFF loader only)...")
 # Setup the default Beacon callbacks
 Dark::ELF::Callbacks.register_defaults
 
+# Register glibc stat-family shims (stat/lstat/fstat) for BOF symbol resolution
+Dark::ELF::Callbacks.register_libc_shims
+
 # Check for COFF file argument
 if ARGV.size < 1
   log_error("No COFF file specified. Usage: dark-agent-direct <coff_file> [args...]")

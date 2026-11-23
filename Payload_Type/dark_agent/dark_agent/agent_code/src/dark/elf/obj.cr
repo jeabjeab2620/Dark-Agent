@@ -77,9 +77,10 @@ module Dark::ELF
     private def setup_memory_mappings
       # Calculate total memory for all sections + thunk table.
       # Allocating one contiguous region guarantees CALL26 range (±128MB).
-      thunk_size = ((@thunk_table_entries * THUNK_SIZE) + 4095_u64) & ~4095_u64
+      mask = Dark::ELF.page_mask
+      thunk_size = ((@thunk_table_entries * THUNK_SIZE) + mask) & ~mask
       total_sections_size = section_headers.sum do |s|
-        (s.size > 0 && s.type == SectionHeader::Type::PROGBITS) ? ((s.size.to_u64 + 4095_u64) & ~4095_u64) + SECTION_SPACING : 0_u64
+        (s.size > 0 && s.type == SectionHeader::Type::PROGBITS) ? ((s.size.to_u64 + mask) & ~mask) + SECTION_SPACING : 0_u64
       end
       total_size = thunk_size + total_sections_size + SECTION_SPACING
 
@@ -99,7 +100,7 @@ module Dark::ELF
 
       # On Apple Silicon, new threads start with JIT write protection ENABLED (exec mode).
       # Must explicitly switch to write mode before any writes to the JIT region.
-      {% if flag?(:darwin) %}
+      {% if flag?(:darwin) && flag?(:aarch64) %}
       LibC.pthread_jit_write_protect_np(0)
       {% end %}
 
@@ -108,7 +109,7 @@ module Dark::ELF
 
         if section.size > 0 && section.type == SectionHeader::Type::PROGBITS
           mapping = Pointer(Void).new(region.address + offset)
-          offset += ((section.size.to_u64 + 4095_u64) & ~4095_u64) + SECTION_SPACING
+          offset += ((section.size.to_u64 + mask) & ~mask) + SECTION_SPACING
 
           @io.seek(section.offset)
           slice = Slice(UInt8).new(mapping.as(UInt8*), section.size)
@@ -377,7 +378,7 @@ module Dark::ELF
     end
 
     private def finalize_memory_protections
-      {% if flag?(:darwin) %}
+      {% if flag?(:darwin) && flag?(:aarch64) %}
       # Apple Silicon MAP_JIT two-step cache flush:
       # 1. sys_dcache_flush (dc civac): writes data cache to PoC (main memory) for the
       #    write VMA so the read/exec VMA sees correct bytes on its next d-cache miss.
@@ -386,19 +387,21 @@ module Dark::ELF
       # 3. pthread_jit_write_protect_np(1): switch MAP_JIT region from write to exec mode.
       # mprotect is NOT called because it would invalidate the d-cache, causing stale reads
       # when the trampoline's ldr x16, #8 runs.
-      log_debug "Flushing JIT region to PoC before exec (darwin)"
+      log_debug "Flushing JIT region to PoC before exec (darwin arm64)"
       LibC.sys_dcache_flush(Pointer(Void).new(@thunk_base), @region_size)
       LibC.sys_icache_invalidate(Pointer(Void).new(@thunk_base), @region_size)
       LibC.pthread_jit_write_protect_np(1)
       {% else %}
-      thunk = LibC.mprotect(Pointer(Void).new(@thunk_base), ((@thunk_table_entries * THUNK_SIZE + 4095_u64) & ~4095_u64), Memory::Protection::READ | Memory::Protection::EXEC)
+      # Linux (both arches) and Intel macOS: plain mprotect per mapping.
+      mask = Dark::ELF.page_mask
+      thunk = LibC.mprotect(Pointer(Void).new(@thunk_base), ((@thunk_table_entries * THUNK_SIZE + mask) & ~mask), Memory::Protection::READ | Memory::Protection::EXEC)
       log_debug "Thunk mprotect result: #{thunk}"
 
       section_headers.each_with_index do |section, i|
         next if @section_mappings[i].nil?
         next unless section.type == SectionHeader::Type::PROGBITS
         log_debug "Setting protection: section=#{section.name}, addr=0x#{@section_mappings[i].address.to_s(16)}, size=0x#{section.size.to_s(16)}, prot=#{@section_prots[i]}"
-        LibC.mprotect(@section_mappings[i].as(Pointer(Void)), ((section.size.to_u64 + 4095_u64) & ~4095_u64), @section_prots[i])
+        LibC.mprotect(@section_mappings[i].as(Pointer(Void)), ((section.size.to_u64 + mask) & ~mask), @section_prots[i])
       end
       {% end %}
     end

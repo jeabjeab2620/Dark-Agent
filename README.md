@@ -10,12 +10,16 @@ Dark Agent is a fully-featured Mythic C2 Agent for Linux and macOS environments.
 
 ## Platform Support
 
-| Build | OS | Min glibc | Coverage |
-|-------|----|-----------|---------|
-| Dynamic | Linux x86_64 | 2.27 | RHEL 8+, Ubuntu 18.04+, Debian 10+ |
-| Dynamic | macOS arm64 | N/A | macOS 12+ (Apple Silicon) |
+| Build | OS | Arch | Min glibc | Coverage |
+|-------|----|------|-----------|---------|
+| Dynamic | Linux | x64 | 2.27 | RHEL 8+, Ubuntu 18.04+, Debian 10+ |
+| Dynamic | Linux | arm64 | 2.27 | RHEL 8+ aarch64, Ubuntu 18.04+ arm64, Debian 10+ arm64, Amazon Graviton |
+| Dynamic | macOS | arm64 | N/A | macOS 12+ (Apple Silicon) |
+| Dynamic | macOS | x64 | N/A | macOS 12+ (Intel) |
 
-Linux builds have OpenSSL statically linked with no `libssl` dependency on the target. macOS binaries are cross-compiled on Linux via Zig and ad-hoc signed with `rcodesign` (SHA-256 CodeDirectory hashes required by macOS 14+).
+Linux builds have OpenSSL, pcre2 and bdwgc statically linked with no `libssl` dependency on the target (glibc itself stays dynamic at 2.27). macOS binaries are cross-compiled on Linux via Zig and ad-hoc signed with `rcodesign` (SHA-256 CodeDirectory hashes required by macOS 14+).
+
+The architecture is chosen per payload; see the `architecture` build parameter below.
 
 ## Mythic Configuration
 
@@ -27,6 +31,7 @@ Linux builds have OpenSSL statically linked with no `libssl` dependency on the t
 - **C2 Profiles**: HTTP, HTTPX (malleable)
 
 **Build Parameters**:
+- `architecture`: ChooseOne (default: `x64`) - Target CPU: `x64` or `arm64`. Applies to both the agent and its BOFs
 - `debug_mode`: Boolean (default: false) - Enable debug logging and verbose output
 - `debug_socks`: Boolean (default: false) - Enable SOCKS proxy debug logging  
 - `encryption`: Boolean (default: true) - Enable AES-256-CBC encryption for C2 traffic
@@ -216,24 +221,35 @@ Full string → `argv[0]`:
 ### Building
 
 ```bash
-# Linux
+# Linux x64 (host compiler)
 gcc -fPIC -c your_bof.c -o your_bof.o -I src/bofs/includes
 
+# Linux arm64 / macOS (cross-compiled with Zig)
+zig cc -target aarch64-linux-gnu.2.27 -fPIC -c your_bof.c -o your_bof.o -I src/bofs/includes
+
 # Build all BOFs (runs inside the Mythic build container)
-./build.sh -b    # Linux
-./build.sh -B    # macOS (aarch64, requires Zig + macOS SDK)
+./build.sh -b                  # Linux, x64 (default)
+./build.sh -b -A arm64         # Linux, arm64
+./build.sh -B                  # macOS, x64 (default), requires Zig + macOS SDK
+./build.sh -B -A arm64         # macOS, arm64
 ```
+
+BOF objects are written to `output/bofs/<os>-<arch>/` and are architecture-specific:
+an `.o` built for one architecture cannot be loaded into an agent of another.
 
 ## Usage
 
 ### Running the Agent
 
+Binary names follow `dark-agent-<os>-<arch>[-<mode>]`:
+
 ```bash
 # Run the debug version
-./output/dark-agent-debug
+./output/dark-agent-linux-x64-debug
 
 # Run the release version
-./output/dark-agent
+./output/dark-agent-linux-x64
+./output/dark-agent-linux-arm64
 ```
 
 ### Direct Mode
@@ -254,5 +270,5 @@ Example usage:
 ./build.sh -D
 
 # Have a cup of COFFee
-./output/dark-agent-direct output/bofs/coffee.o
+./output/dark-agent-direct output/bofs/linux-x64/coffee.o
 ```
