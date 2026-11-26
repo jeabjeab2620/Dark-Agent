@@ -1,0 +1,5 @@
+# Shell scripts are executed by bash inside the Linux build container.
+# CRLF line endings would break the shebang and heredocs, so always store and
+# check these out with LF even on Windows checkouts (core.autocrlf=true).
+*.sh    text eol=lf
+Dockerfile text eol=lf

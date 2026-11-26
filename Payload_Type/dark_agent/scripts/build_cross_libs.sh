@@ -96,6 +96,20 @@ zig cc -target ${ZIG_TARGET} ${SYSROOT_FLAGS} "\$@"
 ZIGEOF
 chmod +x /tmp/zig-cc
 
+# OpenSSL's Configure consumes AR/RANLIB from the environment. These MUST be
+# Zig's archivers: the host `ar` (GNU ar on the Linux build image) writes a
+# symbol table Zig's Mach-O reader cannot parse, which surfaces much later as
+# "unknown cpu architecture: <garbage>" while linking against libssl.a.
+# Guard explicitly so a typo can never silently fall back to the host `ar`.
+ZIG_AR="zig ar"
+ZIG_RANLIB="zig ranlib"
+command -v zig >/dev/null || { echo "[ERROR] zig not found in PATH"; exit 1; }
+[ -n "${ZIG_AR}" ] && [ -n "${ZIG_RANLIB}" ] || {
+    echo "[ERROR] ZIG_AR / ZIG_RANLIB must be set to the zig archivers"
+    exit 1
+}
+echo "    AR=${ZIG_AR} RANLIB=${ZIG_RANLIB}"
+
 echo "[*] Building OpenSSL..."
 OPENSSL_VER=3.1.2
 wget -q "https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz"
@@ -299,6 +313,53 @@ make -j${JOBS} libz.a
 make install
 cd /tmp/cross-libs-build
 echo "[+] zlib done"
+
+# ---------------------------------------------------------------------------
+# Sanity-check every archive before it is baked into the image.
+# A malformed archive used to surface only when an operator built a payload, as
+# "unknown cpu architecture: <garbage>" during the final Zig link. Verify each
+# archive's symbol table is readable and that its member objects are real and
+# of the expected kind, so a broken library set fails the docker build instead.
+# ---------------------------------------------------------------------------
+echo "[*] Verifying archives in ${LIB_PREFIX}/lib"
+verify_failed=0
+for archive in "${LIB_PREFIX}/lib/"*.a; do
+    [ -f "${archive}" ] || continue
+    archive_name=$(basename "${archive}")
+
+    # `zig ar t` walks the archive and its symbol table -- this is exactly the
+    # read that used to fail at payload-link time.
+    if ! member=$(zig ar t "${archive}" 2>/dev/null | head -n 1) || [ -z "${member}" ]; then
+        echo "[ERROR] ${archive_name}: unreadable archive (corrupt symbol table?)"
+        verify_failed=1
+        continue
+    fi
+
+    # Extract one member and confirm it is a real object for this target.
+    tmp_dir=$(mktemp -d)
+    if ! ( cd "${tmp_dir}" && zig ar x "${archive}" "${member}" ) 2>/dev/null; then
+        echo "[ERROR] ${archive_name}: cannot extract member '${member}'"
+        verify_failed=1
+        rm -rf "${tmp_dir}"
+        continue
+    fi
+
+    magic=$(od -An -tx1 -N4 "${tmp_dir}/${member}" 2>/dev/null | tr -d ' \n')
+    rm -rf "${tmp_dir}"
+
+    if [ "${OS_NAME}" = "linux" ] && [ "${magic}" != "7f454c46" ]; then
+        echo "[ERROR] ${archive_name}: member '${member}' is not an ELF object (magic=${magic})"
+        verify_failed=1
+        continue
+    fi
+
+    echo "[+] ${archive_name} OK (${member})"
+done
+
+if [ "${verify_failed}" -ne 0 ]; then
+    echo "[ERROR] One or more archives failed verification for ${OS_NAME}/${ARCH_NAME}"
+    exit 1
+fi
 
 rm -rf /tmp/cross-libs-build
 echo "[+] All static libraries built for ${OS_NAME}/${ARCH_NAME}"

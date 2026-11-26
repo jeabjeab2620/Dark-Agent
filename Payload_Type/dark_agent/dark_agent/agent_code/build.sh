@@ -213,9 +213,8 @@ build_linux_cross() {
         exit 1
     fi
 
-    if [ ! -d "${LINUX_LIB_PREFIX}/lib" ]; then
-        log_error "Missing ${TARGET_ARCH} libraries at ${LINUX_LIB_PREFIX}/lib - rebuild the container"
-        exit 1
+    if [ "$TARGET_ARCH" != "x64" ]; then
+        require_cross_libs "${LINUX_LIB_PREFIX}"
     fi
 
     local profile_flags=""
@@ -271,6 +270,49 @@ build_linux_cross() {
     log_success "Built Dark Agent (${description}) for $PROFILE_TYPE profile (Linux ${TARGET_ARCH})"
 }
 
+# Verify a cross-compile library set exists and is usable before the agent
+# links against it. Guards against a stale or malformed /opt/multiarch-libs set
+# producing a cryptic "unknown cpu architecture" error from the zig linker.
+require_cross_libs() {
+    local prefix="$1"
+    local missing=""
+
+    if [ ! -d "${prefix}/lib" ]; then
+        log_error "Cross-compile libraries not found at ${prefix}/lib"
+        log_error "Rebuild the container: docker build (or mythic-cli build dark_agent)"
+        exit 1
+    fi
+
+    for lib in libssl.a libcrypto.a libpcre2-8.a libgc.a libz.a; do
+        if [ ! -f "${prefix}/lib/${lib}" ]; then
+            missing="${missing} ${lib}"
+        fi
+    done
+
+    if [ -n "${missing}" ]; then
+        log_error "Missing static libraries in ${prefix}/lib:${missing}"
+        log_error "Rebuild the container: docker build (or mythic-cli build dark_agent)"
+        exit 1
+    fi
+
+    # A corrupt archive (e.g. built with the host GNU ar instead of zig ar)
+    # cannot be parsed by the zig linker. Detect it here with a clear message.
+    local bad=""
+    for lib in libssl.a libcrypto.a libpcre2-8.a libgc.a libz.a; do
+        if ! /opt/zig/zig ar t "${prefix}/lib/${lib}" >/dev/null 2>&1; then
+            bad="${bad} ${lib}"
+        fi
+    done
+
+    if [ -n "${bad}" ]; then
+        log_error "Corrupt static libraries in ${prefix}/lib:${bad}"
+        log_error "These archives cannot be read by the zig linker, which usually"
+        log_error "means they were built with the host 'ar' instead of 'zig ar'."
+        log_error "Rebuild the container image to regenerate them."
+        exit 1
+    fi
+}
+
 # Build Dark Agent for macOS (Mach-O binary) via two-phase Crystal cross-compile + Zig link
 build_macos() {
     local crystal_flags="$1"   # extra crystal flags (e.g. "-D debug")
@@ -284,6 +326,11 @@ build_macos() {
         log_error "DARK_AGENT_CONFIG_PATH not set"
         exit 1
     fi
+
+    # Fail fast with an actionable message rather than letting Zig emit
+    # "unknown cpu architecture: <garbage>" if the library set is missing,
+    # stale, or was produced with the wrong archiver.
+    require_cross_libs "${MACOS_PREFIX}"
 
     log_info "Phase 1: Crystal → object file (target: ${MACOS_CRYSTAL_TARGET})"
     PKG_CONFIG_LIBDIR="${MACOS_PREFIX}/lib/pkgconfig" \
