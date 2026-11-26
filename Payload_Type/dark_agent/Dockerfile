@@ -5,7 +5,7 @@
 # deadsnakes then decided 18.04 was too old to live (fair) and purged it after EOL (Apr 2023).
 # So now we build Python from source like it's 1994. The circle of suffering is complete.
 # If you're reading this and thinking "just upgrade to a newer base image" — see line 1.
-FROM ubuntu:18.04
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
