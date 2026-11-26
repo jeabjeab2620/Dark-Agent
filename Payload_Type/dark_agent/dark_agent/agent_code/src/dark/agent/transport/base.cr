@@ -1,4 +1,5 @@
 require "http/client"
+require "socket"
 require "json"
 require "base64"
 require "crypto/subtle"
@@ -420,8 +421,52 @@ module Dark::Agent::Transport
     end
 
     # Get all IP addresses on the system
-    private def get_ips
-      Socket::Addrinfo.tcp(System.hostname, 0, timeout: nil).map(&.ip_address).map(&.address)
+    #
+    # Deliberately does not resolve System.hostname. That lookup depends on an
+    # mDNS or DNS entry for the machine's own name, which is routinely missing:
+    # macOS mDNSResponder only answers .local for names it registered, and DHCP
+    # search domains or container networking can leave it unresolvable. When it
+    # failed, the entire checkin aborted with "Hostname lookup for <host> failed:
+    # No address found" even though the agent was otherwise healthy.
+    #
+    # Primary path attempts the hostname (cheap, and correct when it resolves)
+    # but never lets failure escape; fallback derives the outbound source address
+    # from a UDP route lookup, which needs no name resolution and sends no
+    # packets.
+    private def get_ips : Array(String)
+      ips = [] of String
+
+      begin
+        Socket::Addrinfo.tcp(System.hostname, 0, timeout: nil).each do |addrinfo|
+          address = addrinfo.ip_address.address
+          ips << address unless address.empty? || ips.includes?(address)
+        end
+      rescue ex
+        log_debug("Could not resolve own hostname '#{System.hostname}': #{ex.message}")
+      end
+
+      return ips unless ips.empty?
+
+      # Route-based lookup: connecting a UDP socket only records the destination,
+      # the kernel picks the source address. No packets are transmitted and no DNS
+      # is involved because the peer is an IP literal.
+      begin
+        probe = UDPSocket.new
+        begin
+          probe.connect(Socket::IPAddress.new("8.8.8.8", 53))
+          address = probe.local_address.address
+          ips << address unless address.empty?
+        ensure
+          probe.close
+        end
+      rescue ex
+        log_debug("Route-based address probe failed: #{ex.message}")
+      end
+
+      # Last resort so the checkin still reports something rather than nothing.
+      ips << "127.0.0.1" if ips.empty?
+
+      ips
     end
 
     # ENCRYPTION AND MESSAGE HANDLING
