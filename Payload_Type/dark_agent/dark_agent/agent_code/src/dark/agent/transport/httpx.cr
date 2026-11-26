@@ -74,9 +74,36 @@ module Dark::Agent::Transport
 
       log_debug("Initializing callback domains from available options")
 
-      # Get domains from c2 configuration
-      callback_domains = @profile["callback_domains"].as_a
-      @available_domains = callback_domains.map do |domain|
+      # Resolve the domain list defensively. This runs during Agent initialization,
+      # which has no top-level rescue in dark-agent.cr, and an unrescued exception
+      # aborts the process: the unwinder faults before any rescue can run, so a
+      # config mismatch surfaces as "invalid memory access (signal 11)" rather than
+      # a useful message. Never raise here.
+      domains = [] of JSON::Any
+
+      if domains_json = @profile["callback_domains"]?
+        if as_list = domains_json.as_a?
+          domains = as_list
+        end
+      end
+
+      # Fall back to callback_host, which some profiles (and the documented
+      # agent-httpx-example.json) provide instead of a domains array.
+      if domains.empty?
+        if host_fallback = @profile["callback_host"]?
+          log_debug("No callback_domains; falling back to callback_host")
+          domains = [host_fallback]
+        end
+      end
+
+      if domains.empty?
+        log_error("C2 profile has neither 'callback_domains' nor 'callback_host'. The agent cannot determine where to check in. Ensure the httpx profile supplies callback domains, then rebuild the payload.")
+        @available_domains = [] of String
+        @selected_domain = ""
+        return
+      end
+
+      @available_domains = domains.map do |domain|
         domain_str = domain.as_s
         # Ensure domain has protocol
         if !domain_str.starts_with?("http://") && !domain_str.starts_with?("https://")
